@@ -8,9 +8,7 @@ resource "azurerm_management_lock" "this" {
   notes      = var.lock.kind == "CanNotDelete" ? "Cannot delete the resource or its child resources." : "Cannot delete or modify the resource or its child resources."
 
   depends_on = [
-    azapi_resource.vnet,
-    module.subnet,
-    module.peering
+    azapi_resource.vnet
   ]
 }
 
@@ -45,23 +43,20 @@ resource "azurerm_monitor_diagnostic_setting" "this" {
 
   dynamic "enabled_log" {
     for_each = each.value.log_categories
-
     content {
       category = enabled_log.value
     }
   }
   dynamic "enabled_log" {
     for_each = each.value.log_groups
-
     content {
       category_group = enabled_log.value
     }
   }
-  dynamic "enabled_metric" {
+  dynamic "metric" {
     for_each = each.value.metric_categories
-
     content {
-      category = enabled_metric.value
+      category = metric.value
     }
   }
 }

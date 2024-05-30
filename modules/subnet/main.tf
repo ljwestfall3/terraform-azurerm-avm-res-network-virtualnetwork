@@ -1,14 +1,16 @@
 resource "azapi_resource" "subnet" {
-  count = local.ipam_enabled ? 0 : 1
-
-  name      = var.name
-  parent_id = var.parent_id
-  type      = "Microsoft.Network/virtualNetworks/subnets@2024-07-01"
+  type = "Microsoft.Network/virtualNetworks/subnets@2023-11-01"
   body = {
     properties = {
-      addressPrefix         = var.ipam_pools == null ? var.address_prefix : null
-      addressPrefixes       = var.ipam_pools == null ? var.address_prefixes : null
-      delegations           = local.delegations
+      addressPrefixes = var.address_prefixes
+      delegations = var.delegation != null ? [
+        for delegation in var.delegation : {
+          name = delegation.name
+          properties = {
+            serviceName = delegation.service_delegation.name
+          }
+        }
+      ] : []
       defaultOutboundAccess = var.default_outbound_access_enabled
       natGateway = var.nat_gateway != null ? {
         id = var.nat_gateway.id
@@ -21,10 +23,9 @@ resource "azapi_resource" "subnet" {
       routeTable = var.route_table != null ? {
         id = var.route_table.id
       } : null
-      serviceEndpoints = var.service_endpoints_with_location != null ? [
-        for service_endpoint in var.service_endpoints_with_location : {
-          service   = service_endpoint.service
-          locations = service_endpoint.locations
+      serviceEndpoints = var.service_endpoints != null ? [
+        for service_endpoint in var.service_endpoints : {
+          service = service_endpoint
         }
       ] : null
       serviceEndpointPolicies = var.service_endpoint_policies != null ? [
@@ -32,32 +33,19 @@ resource "azapi_resource" "subnet" {
           id = service_endpoint_policy.id
         }
       ] : null
-      sharingScope = var.sharing_scope
     }
   }
-  locks                     = [var.parent_id]
-  response_export_values    = ["properties.addressPrefixes", "properties.addressPrefix"]
-  retry                     = var.retry
+  locks                     = [var.virtual_network.resource_id]
+  name                      = var.name
+  parent_id                 = var.virtual_network.resource_id
   schema_validation_enabled = true
-
-  timeouts {
-    create = var.timeouts.create
-    delete = var.timeouts.delete
-    read   = var.timeouts.read
-    update = var.timeouts.update
-  }
-}
-
-moved {
-  from = azapi_resource.subnet
-  to   = azapi_resource.subnet[0]
 }
 
 resource "azurerm_role_assignment" "subnet" {
   for_each = var.role_assignments
 
   principal_id                           = each.value.principal_id
-  scope                                  = local.ipam_enabled ? azapi_resource.subnet_ipam[0].id : azapi_resource.subnet[0].id
+  scope                                  = azapi_resource.subnet.id
   condition                              = each.value.condition
   condition_version                      = each.value.condition_version
   delegated_managed_identity_resource_id = each.value.delegated_managed_identity_resource_id
