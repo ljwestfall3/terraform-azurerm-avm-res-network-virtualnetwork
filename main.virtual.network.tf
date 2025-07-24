@@ -1,5 +1,8 @@
 resource "azapi_resource" "vnet" {
-  type = "Microsoft.Network/virtualNetworks@2023-11-01"
+  location  = var.location
+  name      = var.name
+  parent_id = "/subscriptions/${local.subscription_id}/resourceGroups/${var.resource_group_name}"
+  type      = "Microsoft.Network/virtualNetworks@2023-11-01"
   body = {
     properties = {
       addressSpace = {
@@ -27,17 +30,23 @@ resource "azapi_resource" "vnet" {
       type = var.extended_location.type
     } : null
   }
-  location                  = var.location
-  name                      = var.name
-  parent_id                 = "/subscriptions/${local.subscription_id}/resourceGroups/${var.resource_group_name}"
+  retry                     = var.retry
   schema_validation_enabled = true
   tags                      = var.tags
+
+  timeouts {
+    create = var.timeouts.create
+    delete = var.timeouts.delete
+    read   = var.timeouts.read
+    update = var.timeouts.update
+  }
 
   depends_on = [azapi_update_resource.allow_drop_unencrypted_vnet]
 
   lifecycle {
     ignore_changes = [
       body.properties.subnets,
+      body.properties.virtualNetworkPeerings
     ]
   }
 }
@@ -45,9 +54,9 @@ resource "azapi_resource" "vnet" {
 resource "azapi_update_resource" "allow_drop_unencrypted_vnet" {
   count = var.encryption != null ? (var.encryption.enforcement == "DropUnencrypted" ? 1 : 0) : 0
 
-  type = "Microsoft.Features/featureProviders/subscriptionFeatureRegistrations@2021-07-01"
+  resource_id = "/subscriptions/${local.subscription_id}/providers/Microsoft.Features/featureProviders/Microsoft.Network/subscriptionFeatureRegistrations/AllowDropUnecryptedVnet"
+  type        = "Microsoft.Features/featureProviders/subscriptionFeatureRegistrations@2021-07-01"
   body = {
     properties = {}
   }
-  resource_id = "/subscriptions/${local.subscription_id}/providers/Microsoft.Features/featureProviders/Microsoft.Network/subscriptionFeatureRegistrations/AllowDropUnecryptedVnet"
 }
