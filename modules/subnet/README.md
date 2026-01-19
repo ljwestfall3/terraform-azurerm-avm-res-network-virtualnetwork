@@ -73,7 +73,7 @@ For comprehensive multi-subnet IPAM scenarios with time-delayed sequential creat
 ### For IPAM Subnets
 - **IPAM-enabled Virtual Network**: Parent VNet must be created with IPAM pools (not traditional VNet)
 - **Azure Virtual Network Manager**: Required with IPAM pools configured
-- **azapi provider**: Version ~> 2.11 required for IPAM subnet operations
+- **azapi provider**: Version ~> 2.4 required for IPAM subnet operations
 
 ## Usage
 
@@ -127,15 +127,17 @@ The following requirements are needed by this module:
 
 - <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) (>= 1.9, < 2.0)
 
-- <a name="requirement_azapi"></a> [azapi](#requirement\_azapi) (~> 2.11)
+- <a name="requirement_azapi"></a> [azapi](#requirement\_azapi) (~> 2.5)
+
+- <a name="requirement_azurerm"></a> [azurerm](#requirement\_azurerm) (~> 4.0)
 
 ## Resources
 
 The following resources are used by this module:
 
-- [azapi_resource.role_assignments](https://registry.terraform.io/providers/azure/azapi/latest/docs/resources/resource) (resource)
 - [azapi_resource.subnet](https://registry.terraform.io/providers/azure/azapi/latest/docs/resources/resource) (resource)
 - [azapi_resource.subnet_ipam](https://registry.terraform.io/providers/azure/azapi/latest/docs/resources/resource) (resource)
+- [azurerm_role_assignment.subnet](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/role_assignment) (resource)
 
 <!-- markdownlint-disable MD013 -->
 ## Required Inputs
@@ -231,8 +233,7 @@ Default: `null`
 Description: (Optional) A list of IPAM pools to allocate subnet address space from. Each pool supports the following:
 
 - `pool_id` - (Required) The ID of the IPAM pool to allocate from.
-- `number_of_ip_addresses` - (Optional) The number of IP addresses to request from the IPAM pool. If not specified, it will be calculated based on the `prefix_length`.
-- `prefix_length` - (Optional) The prefix length for the subnet allocation (e.g., 24 for a /24 subnet). Required if `number_of_ip_addresses` is not specified.
+- `prefix_length` - (Required) The prefix length for the subnet allocation (e.g., 24 for a /24 subnet).
 
 Note: Only one IPAM pool allocation per subnet is currently supported. When using IPAM pools, do not specify `address_prefix` or `address_prefixes`.
 
@@ -240,9 +241,8 @@ Type:
 
 ```hcl
 list(object({
-    pool_id                = string
-    number_of_ip_addresses = optional(string)
-    prefix_length          = optional(number)
+    pool_id       = string
+    prefix_length = number
   }))
 ```
 
@@ -280,23 +280,9 @@ Default: `null`
 
 Description: (Optional) Enable or Disable network policies for the private endpoint on the subnet. Possible values are `Disabled`, `Enabled`, `NetworkSecurityGroupEnabled` and `RouteTableEnabled`. Defaults to `Enabled`.
 
-This value is only applied when `private_endpoint_network_policies_enabled` is `true`. Set `private_endpoint_network_policies_enabled` to `false` to omit the `privateEndpointNetworkPolicies` property from the request entirely (required in regions that do not support it, e.g. South Africa West).
-
 Type: `string`
 
 Default: `"Enabled"`
-
-### <a name="input_private_endpoint_network_policies_enabled"></a> [private\_endpoint\_network\_policies\_enabled](#input\_private\_endpoint\_network\_policies\_enabled)
-
-Description: (Optional) Controls whether the `privateEndpointNetworkPolicies` property is sent to Azure for the subnet. Defaults to `true`.
-
-When `true`, the value of `private_endpoint_network_policies` is applied. When `false`, the property is omitted from the request entirely, which is required in regions that do not support it (e.g. South Africa West) because they reject the property outright.
-
-Note: unlike `private_link_service_network_policies_enabled` (where `false` sends `"Disabled"`), setting this to `false` removes the property from the request rather than sending a value. To send `"Disabled"`, leave this `true` and set `private_endpoint_network_policies = "Disabled"`.
-
-Type: `bool`
-
-Default: `true`
 
 ### <a name="input_private_link_service_network_policies_enabled"></a> [private\_link\_service\_network\_policies\_enabled](#input\_private\_link\_service\_network\_policies\_enabled)
 
@@ -390,21 +376,11 @@ map(object({
 
 Default: `null`
 
-### <a name="input_service_endpoints"></a> [service\_endpoints](#input\_service\_endpoints)
-
-Description: (Optional) A set of service endpoints to associate with the subnet, specified as a set of service names (e.g. `["Microsoft.Storage", "Microsoft.Sql"]`).
-
-Locations are intentionally not configurable: Azure implicitly expands service-endpoint locations (for example, `Microsoft.Storage` in a region adds its paired region), which caused perpetual drift when locations were sent explicitly. See issues #22 and #39.
-
-Type: `set(string)`
-
-Default: `null`
-
 ### <a name="input_service_endpoints_with_location"></a> [service\_endpoints\_with\_location](#input\_service\_endpoints\_with\_location)
 
-Description: **Removed.** Use `service_endpoints` instead, which takes a set of service names.
-
-This variable is still declared so that configurations which set it fail with an explanatory error naming the replacement, rather than the generic "unexpected argument" error. Setting it is always an error. It will be removed entirely in a future release.
+Description: (Optional) A set of service endpoints with location restrictions to associate with the subnet. Each service endpoint is an object with the following properties:
+- `service` - (Required) The service name. Changing this forces a new resource to be created.
+- `locations` - (Optional) A set of Azure region names where the service endpoint should apply. Default is `["*"]`, which means the service endpoint applies to all regions. If you want to restrict the service endpoint to specific regions, you can provide a set of region names. Changing this forces a new resource to be created.
 
 Type:
 
@@ -468,13 +444,7 @@ Description: The resource ID of the subnet.
 
 ## Modules
 
-The following Modules are called:
-
-### <a name="module_interfaces"></a> [interfaces](#module\_interfaces)
-
-Source: Azure/avm-utl-interfaces/azure
-
-Version: 0.6.0
+No modules.
 
 <!-- markdownlint-disable-next-line MD041 -->
 ## Data Collection

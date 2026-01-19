@@ -82,17 +82,15 @@ DESCRIPTION
 
 variable "ipam_pools" {
   type = list(object({
-    pool_id                = string
-    number_of_ip_addresses = optional(string)
-    prefix_length          = optional(number)
+    pool_id       = string
+    prefix_length = number
   }))
   default     = null
   description = <<DESCRIPTION
 (Optional) A list of IPAM pools to allocate subnet address space from. Each pool supports the following:
 
 - `pool_id` - (Required) The ID of the IPAM pool to allocate from.
-- `number_of_ip_addresses` - (Optional) The number of IP addresses to request from the IPAM pool. If not specified, it will be calculated based on the `prefix_length`.
-- `prefix_length` - (Optional) The prefix length for the subnet allocation (e.g., 24 for a /24 subnet). Required if `number_of_ip_addresses` is not specified.
+- `prefix_length` - (Required) The prefix length for the subnet allocation (e.g., 24 for a /24 subnet).
 
 Note: Only one IPAM pool allocation per subnet is currently supported. When using IPAM pools, do not specify `address_prefix` or `address_prefixes`.
 DESCRIPTION
@@ -102,8 +100,8 @@ DESCRIPTION
     error_message = "Only one IPAM pool allocation per subnet is supported."
   }
   validation {
-    condition     = var.ipam_pools == null ? true : alltrue([for pool in var.ipam_pools : pool.number_of_ip_addresses != null || (pool.prefix_length != null && pool.prefix_length >= 16 && pool.prefix_length <= 30)])
-    error_message = "Either number_of_ip_addresses or a prefix_length between 16 and 30 must be specified for each IPAM pool."
+    condition     = var.ipam_pools == null ? true : alltrue([for pool in var.ipam_pools : pool.prefix_length >= 16 && pool.prefix_length <= 30])
+    error_message = "IPAM pool prefix_length must be between 16 and 30 for IPv4 subnets."
   }
 }
 
@@ -132,8 +130,6 @@ variable "private_endpoint_network_policies" {
   default     = "Enabled"
   description = <<DESCRIPTION
 (Optional) Enable or Disable network policies for the private endpoint on the subnet. Possible values are `Disabled`, `Enabled`, `NetworkSecurityGroupEnabled` and `RouteTableEnabled`. Defaults to `Enabled`.
-
-This value is only applied when `private_endpoint_network_policies_enabled` is `true`. Set `private_endpoint_network_policies_enabled` to `false` to omit the `privateEndpointNetworkPolicies` property from the request entirely (required in regions that do not support it, e.g. South Africa West).
 DESCRIPTION
   nullable    = false
 
@@ -141,19 +137,6 @@ DESCRIPTION
     condition     = can(regex("^(Disabled|Enabled|NetworkSecurityGroupEnabled|RouteTableEnabled)$", var.private_endpoint_network_policies))
     error_message = "private_endpoint_network_policies must be one of Disabled, Enabled, NetworkSecurityGroupEnabled, or RouteTableEnabled."
   }
-}
-
-variable "private_endpoint_network_policies_enabled" {
-  type        = bool
-  default     = true
-  description = <<DESCRIPTION
-(Optional) Controls whether the `privateEndpointNetworkPolicies` property is sent to Azure for the subnet. Defaults to `true`.
-
-When `true`, the value of `private_endpoint_network_policies` is applied. When `false`, the property is omitted from the request entirely, which is required in regions that do not support it (e.g. South Africa West) because they reject the property outright.
-
-Note: unlike `private_link_service_network_policies_enabled` (where `false` sends `"Disabled"`), setting this to `false` removes the property from the request rather than sending a value. To send `"Disabled"`, leave this `true` and set `private_endpoint_network_policies = "Disabled"`.
-DESCRIPTION
-  nullable    = false
 }
 
 variable "private_link_service_network_policies_enabled" {
@@ -232,20 +215,6 @@ variable "service_endpoint_policies" {
 DESCRIPTION
 }
 
-variable "service_endpoints" {
-  type        = set(string)
-  default     = null
-  description = <<DESCRIPTION
-(Optional) A set of service endpoints to associate with the subnet, specified as a set of service names (e.g. `["Microsoft.Storage", "Microsoft.Sql"]`).
-
-Locations are intentionally not configurable: Azure implicitly expands service-endpoint locations (for example, `Microsoft.Storage` in a region adds its paired region), which caused perpetual drift when locations were sent explicitly. See issues #22 and #39.
-DESCRIPTION
-}
-
-# The variable is intentionally unused beyond its own validation: it exists
-# solely so that setting the removed argument fails with a message naming the
-# replacement, instead of Terraform's generic "unexpected argument" error.
-# tflint-ignore: terraform_unused_declarations
 variable "service_endpoints_with_location" {
   type = list(object({
     service   = string
@@ -253,14 +222,18 @@ variable "service_endpoints_with_location" {
   }))
   default     = null
   description = <<DESCRIPTION
-**Removed.** Use `service_endpoints` instead, which takes a set of service names.
-
-This variable is still declared so that configurations which set it fail with an explanatory error naming the replacement, rather than the generic "unexpected argument" error. Setting it is always an error. It will be removed entirely in a future release.
+(Optional) A set of service endpoints with location restrictions to associate with the subnet. Each service endpoint is an object with the following properties:
+- `service` - (Required) The service name. Changing this forces a new resource to be created.
+- `locations` - (Optional) A set of Azure region names where the service endpoint should apply. Default is `["*"]`, which means the service endpoint applies to all regions. If you want to restrict the service endpoint to specific regions, you can provide a set of region names. Changing this forces a new resource to be created.
 DESCRIPTION
 
   validation {
-    condition     = var.service_endpoints_with_location == null
-    error_message = "`service_endpoints_with_location` has been removed. Use `service_endpoints` with a set of service names instead, for example `service_endpoints = [\"Microsoft.Storage\"]`. Locations are no longer configurable because Azure expands service-endpoint locations implicitly, which caused perpetual drift."
+    error_message = "Locations values must be unique"
+    condition     = var.service_endpoints_with_location != null ? alltrue([for endpoint in var.service_endpoints_with_location : length(toset(endpoint.locations)) == length(endpoint.locations)]) : true
+  }
+  validation {
+    error_message = "Service names must be unique"
+    condition     = var.service_endpoints_with_location != null ? length([for endpoint in var.service_endpoints_with_location : endpoint.service]) == length(toset([for endpoint in var.service_endpoints_with_location : endpoint.service])) : true
   }
 }
 

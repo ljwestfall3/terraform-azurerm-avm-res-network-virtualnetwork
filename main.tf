@@ -1,3 +1,5 @@
+
+
 resource "azapi_resource" "vnet" {
   location  = var.location
   name      = var.name
@@ -9,7 +11,7 @@ resource "azapi_resource" "vnet" {
         var.ipam_pools != null ? {
           ipamPoolPrefixAllocations = [
             for ipam_pool in var.ipam_pools : {
-              numberOfIpAddresses = ipam_pool.number_of_ip_addresses != null ? ipam_pool.number_of_ip_addresses : tostring(pow(2, (ipam_pool.prefix_length >= 48 ? 128 : 32) - ipam_pool.prefix_length))
+              numberOfIpAddresses = tostring(pow(2, (ipam_pool.prefix_length >= 48 ? 128 : 32) - ipam_pool.prefix_length))
               pool = {
                 id = ipam_pool.id
               }
@@ -60,3 +62,5 @@ resource "azapi_resource" "vnet" {
     update = var.timeouts.update
   }
 }
+
+
