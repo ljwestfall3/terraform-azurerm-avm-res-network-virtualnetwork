@@ -1,27 +1,13 @@
-# Create subnet with conditional IPAM or traditional addressing
 resource "azapi_resource" "subnet" {
+  count = local.ipam_enabled ? 0 : 1
+
   name      = var.name
   parent_id = var.parent_id
   type      = "Microsoft.Network/virtualNetworks/subnets@2024-07-01"
   body = {
-    properties = {
-      # Conditional addressing: IPAM pools OR traditional prefix/prefixes
-      ipamPoolPrefixAllocations = var.ipam_pools != null ? [
-        for pool in var.ipam_pools : {
-          pool = {
-            id = pool.pool_id
-          }
-          numberOfIpAddresses = tostring(
-            pool.prefix_length <= 32
-            ? pow(2, 32 - pool.prefix_length) # IPv4 calculation
-            : 0                               # IPv6 - Azure uses 0 for IPv6 pools
-          )
-        }
-      ] : null
-      addressPrefix   = var.ipam_pools == null ? var.address_prefix : null
-      addressPrefixes = var.ipam_pools == null ? var.address_prefixes : null
-
-      # Common subnet properties
+    properties = merge({
+      addressPrefix         = var.ipam_pools == null ? var.address_prefix : null
+      addressPrefixes       = var.ipam_pools == null ? var.address_prefixes : null
       delegations           = local.delegations
       defaultOutboundAccess = var.default_outbound_access_enabled
       natGateway = var.nat_gateway != null ? {
@@ -30,15 +16,13 @@ resource "azapi_resource" "subnet" {
       networkSecurityGroup = var.network_security_group != null ? {
         id = var.network_security_group.id
       } : null
-      privateEndpointNetworkPolicies    = var.private_endpoint_network_policies
       privateLinkServiceNetworkPolicies = var.private_link_service_network_policies_enabled == false ? "Disabled" : "Enabled"
       routeTable = var.route_table != null ? {
         id = var.route_table.id
       } : null
-      serviceEndpoints = local.service_endpoints_to_use != null ? [
-        for service_endpoint in local.service_endpoints_to_use : {
-          service   = service_endpoint.service
-          locations = can(service_endpoint.locations) ? service_endpoint.locations : null
+      serviceEndpoints = var.service_endpoints != null ? [
+        for service_endpoint in var.service_endpoints : {
+          service = service_endpoint
         }
       ] : null
       serviceEndpointPolicies = var.service_endpoint_policies != null ? [
@@ -47,11 +31,13 @@ resource "azapi_resource" "subnet" {
         }
       ] : null
       sharingScope = var.sharing_scope
-    }
+      }, var.private_endpoint_network_policies_enabled ? {
+      privateEndpointNetworkPolicies = var.private_endpoint_network_policies
+    } : {})
   }
-  ignore_null_property      = true
   locks                     = [var.parent_id]
-  response_export_values    = var.ipam_pools != null ? ["properties.addressPrefixes"] : []
+  list_unique_id_property   = { "properties.serviceEndpoints" = "service" }
+  response_export_values    = ["properties.addressPrefixes", "properties.addressPrefix"]
   retry                     = var.retry
   schema_validation_enabled = true
 
@@ -63,15 +49,34 @@ resource "azapi_resource" "subnet" {
   }
 }
 
-resource "azurerm_role_assignment" "subnet" {
-  for_each = var.role_assignments
+moved {
+  from = azapi_resource.subnet
+  to   = azapi_resource.subnet[0]
+}
 
-  principal_id                           = each.value.principal_id
-  scope                                  = azapi_resource.subnet.id
-  condition                              = each.value.condition
-  condition_version                      = each.value.condition_version
-  delegated_managed_identity_resource_id = each.value.delegated_managed_identity_resource_id
-  role_definition_id                     = strcontains(lower(each.value.role_definition_id_or_name), lower(local.role_definition_resource_substring)) ? each.value.role_definition_id_or_name : null
-  role_definition_name                   = strcontains(lower(each.value.role_definition_id_or_name), lower(local.role_definition_resource_substring)) ? null : each.value.role_definition_id_or_name
-  skip_service_principal_aad_check       = each.value.skip_service_principal_aad_check
+resource "azapi_resource" "role_assignments" {
+  for_each = module.interfaces.role_assignments_azapi
+
+  name                   = each.value.name
+  parent_id              = local.ipam_enabled ? azapi_resource.subnet_ipam[0].id : azapi_resource.subnet[0].id
+  type                   = each.value.type
+  body                   = each.value.body
+  ignore_null_property   = true
+  response_export_values = []
+  retry                  = var.retry
+}
+
+# Shared AVM interfaces (role assignments) transformed into azapi resource
+# payloads via the avm-utl-interfaces utility module.
+module "interfaces" {
+  source  = "git::https://avm.mirror.invalid/terraform-azure-avm-utl-interfaces.git?ref=v0.6.0-local"
+
+  enable_telemetry                 = false
+  role_assignment_definition_scope = local.role_assignment_definition_scope
+  role_assignments                 = var.role_assignments
+}
+
+moved {
+  from = azurerm_role_assignment.subnet
+  to   = azapi_resource.role_assignments
 }

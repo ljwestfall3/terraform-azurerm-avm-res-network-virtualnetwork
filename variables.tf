@@ -165,7 +165,7 @@ variable "extended_location" {
 DESCRIPTION
 
   validation {
-    condition     = var.extended_location != null ? contains("EdgeZone", var.extended_location.type) : true
+    condition     = var.extended_location != null ? var.extended_location.type == "EdgeZone" : true
     error_message = "Extended location type must be EdgeZone"
   }
 }
@@ -180,44 +180,50 @@ DESCRIPTION
 
 variable "ipam_pools" {
   type = list(object({
-    id            = string
-    prefix_length = number
+    id                     = string
+    number_of_ip_addresses = optional(string)
+    prefix_length          = optional(number)
   }))
   default     = null
   description = <<DESCRIPTION
 (Optional) Specifies the IPAM settings for requesting an address_space from an IP Pool. Only one IPv4 and one IPv6 pool can be specified.
 
 - `id`: The ID of the IPAM pool.
-- `prefix_length`: The length of the /XX CIDR range to request. for example 24 for a /24. Prefix length must be between 2 and 29 for IPv4 and 48 and 64 for IPv6.
+- `number_of_ip_addresses`: (Optional) The number of IP addresses to request from the IPAM pool. If not specified, it will be calculated based on the `prefix_length`.
+- `prefix_length`: (Optional) The length of the /XX CIDR range to request. for example 24 for a /24. Prefix length must be between 2 and 29 for IPv4 and 48 and 64 for IPv6.
 DESCRIPTION
 
   validation {
     condition = alltrue([
-      for ipam_pool in var.ipam_pools != null ? var.ipam_pools : [] : can(regex("^\\/subscriptions\\/[\\w-]+\\/resourceGroups\\/[\\w-]+\\/providers\\/Microsoft\\.Network\\/networkManagers\\/[\\w-]+\\/ipamPools\\/[\\w-]+$", ipam_pool.id))
+      for ipam_pool in var.ipam_pools != null ? var.ipam_pools : [] : can(regex("^\\/subscriptions\\/[\\w-]+\\/resourceGroups\\/[\\w-]+\\/providers\\/Microsoft\\.Network\\/networkManagers\\/[\\w-]+\\/ipamPools\\/[\\w\\.-]+$", ipam_pool.id))
     ]) || var.ipam_pools == null
     error_message = "IPAM pool ID must be a valid ipamPools resource ID."
   }
   validation {
     condition = alltrue([
-      for ipam_pool in var.ipam_pools != null ? var.ipam_pools : [] : (ipam_pool.prefix_length >= 2 && ipam_pool.prefix_length <= 29) || (ipam_pool.prefix_length >= 48 && ipam_pool.prefix_length <= 64)
+      for ipam_pool in var.ipam_pools != null ? var.ipam_pools : [] : ipam_pool.prefix_length != null ? (ipam_pool.prefix_length >= 2 && ipam_pool.prefix_length <= 29) || (ipam_pool.prefix_length >= 48 && ipam_pool.prefix_length <= 64) : true
     ]) || var.ipam_pools == null
     error_message = "Prefix length must be between 2 and 29 for IPv4 and 48 and 64 for IPv6."
   }
   validation {
     condition = alltrue([
-      for ipam_pool in var.ipam_pools != null ? var.ipam_pools : [] : length(ipam_pool) >= 1 && length(ipam_pool) <= 2
+      for ipam_pool in var.ipam_pools != null ? var.ipam_pools : [] : ipam_pool.number_of_ip_addresses != null || ipam_pool.prefix_length != null
     ]) || var.ipam_pools == null
+    error_message = "Each IPAM pool entry must specify either number_of_ip_addresses or prefix_length."
+  }
+  validation {
+    condition     = var.ipam_pools == null || (length(var.ipam_pools) >= 1 && length(var.ipam_pools) <= 2)
     error_message = "Only one or two IPAM pools can be specified."
   }
   validation {
     condition = length([
-      for ipam_pool in var.ipam_pools != null ? var.ipam_pools : [] : ipam_pool if ipam_pool.prefix_length == 64
+      for ipam_pool in var.ipam_pools != null ? var.ipam_pools : [] : ipam_pool if ipam_pool.prefix_length != null ? ipam_pool.prefix_length >= 48 && ipam_pool.prefix_length <= 64 : false
     ]) <= 1 || var.ipam_pools == null
     error_message = "Only one IPv6 pool can be specified."
   }
   validation {
     condition = length([
-      for ipam_pool in var.ipam_pools != null ? var.ipam_pools : [] : ipam_pool if ipam_pool.prefix_length >= 2 && ipam_pool.prefix_length <= 29
+      for ipam_pool in var.ipam_pools != null ? var.ipam_pools : [] : ipam_pool if ipam_pool.prefix_length != null ? ipam_pool.prefix_length >= 2 && ipam_pool.prefix_length <= 29 : false
     ]) <= 1 || var.ipam_pools == null
     error_message = "Only one IPv4 pool can be specified."
   }
@@ -319,11 +325,11 @@ variable "peerings" {
 - `allow_virtual_network_access`: (Optional) Enables access from the local virtual network to the remote virtual network. Defaults to true.
 - `do_not_verify_remote_gateways`: (Optional) Disables the verification of remote gateways for the virtual networks. Defaults to false.
 - `enable_only_ipv6_peering`: (Optional) Enables only IPv6 peering for the virtual networks. Defaults to false.
-- `peer_complete_vnets`: (Optional) Enables the peering of complete virtual networks for the virtual networks. Defaults to false.
-- `local_peered_address_spaces`: (Optional) The address spaces to peer with the remote virtual network. Only used when `peer_complete_vnets` is set to true.
-- `remote_peered_address_spaces`: (Optional) The address spaces to peer from the remote virtual network. Only used when `peer_complete_vnets` is set to true.
-- `local_peered_subnets`: (Optional) The subnets to peer with the remote virtual network. Only used when `peer_complete_vnets` is set to true.
-- `remote_peered_subnets`: (Optional) The subnets to peer from the remote virtual network. Only used when `peer_complete_vnets` is set to true.
+- `peer_complete_vnets`: (Optional) Enables the peering of complete virtual networks for the virtual networks. Defaults to true.
+- `local_peered_address_spaces`: (Optional) The address spaces to peer with the remote virtual network. Only used when `peer_complete_vnets` is set to false.
+- `remote_peered_address_spaces`: (Optional) The address spaces to peer from the remote virtual network. Only used when `peer_complete_vnets` is set to false.
+- `local_peered_subnets`: (Optional) The subnets to peer with the remote virtual network. Only used when `peer_complete_vnets` is set to false.
+- `remote_peered_subnets`: (Optional) The subnets to peer from the remote virtual network. Only used when `peer_complete_vnets` is set to false.
 - `use_remote_gateways`: (Optional) Enables the use of remote gateways for the virtual networks. Defaults to false.
 - `create_reverse_peering`: (Optional) Creates the reverse peering to form a complete peering.
 - `reverse_name`: (Optional) If you have selected `create_reverse_peering`, then this name will be used for the reverse peer.
@@ -332,11 +338,11 @@ variable "peerings" {
 - `reverse_allow_virtual_network_access`: (Optional) If you have selected `create_reverse_peering`, enables access from the local virtual network to the remote virtual network. Defaults to true.
 - `reverse_do_not_verify_remote_gateways`: (Optional) If you have selected `create_reverse_peering`, disables the verification of remote gateways for the virtual networks. Defaults to false.
 - `reverse_enable_only_ipv6_peering`: (Optional) If you have selected `create_reverse_peering`, enables only IPv6 peering for the virtual networks. Defaults to false.
-- `reverse_peer_complete_vnets`: (Optional) If you have selected `create_reverse_peering`, enables the peering of complete virtual networks for the virtual networks. Defaults to false.
-- `reverse_local_peered_address_spaces`: (Optional) If you have selected `create_reverse_peering`, the address spaces to peer with the remote virtual network. Only used when `reverse_peer_complete_vnets` is set to true.
-- `reverse_remote_peered_address_spaces`: (Optional) If you have selected `create_reverse_peering`, the address spaces to peer from the remote virtual network. Only used when `reverse_peer_complete_vnets` is set to true.
-- `reverse_local_peered_subnets`: (Optional) If you have selected `create_reverse_peering`, the subnets to peer with the remote virtual network. Only used when `reverse_peer_complete_vnets` is set to true.
-- `reverse_remote_peered_subnets`: (Optional) If you have selected `create_reverse_peering`, the subnets to peer from the remote virtual network. Only used when `reverse_peer_complete_vnets` is set to true.
+- `reverse_peer_complete_vnets`: (Optional) If you have selected `create_reverse_peering`, enables the peering of complete virtual networks for the virtual networks. Defaults to true.
+- `reverse_local_peered_address_spaces`: (Optional) If you have selected `create_reverse_peering`, the address spaces to peer with the remote virtual network. Only used when `reverse_peer_complete_vnets` is set to false.
+- `reverse_remote_peered_address_spaces`: (Optional) If you have selected `create_reverse_peering`, the address spaces to peer from the remote virtual network. Only used when `reverse_peer_complete_vnets` is set to false.
+- `reverse_local_peered_subnets`: (Optional) If you have selected `create_reverse_peering`, the subnets to peer with the remote virtual network. Only used when `reverse_peer_complete_vnets` is set to false.
+- `reverse_remote_peered_subnets`: (Optional) If you have selected `create_reverse_peering`, the subnets to peer from the remote virtual network. Only used when `reverse_peer_complete_vnets` is set to false.
 - `reverse_use_remote_gateways`: (Optional) If you have selected `create_reverse_peering`, enables the use of remote gateways for the virtual networks. Defaults to false.
 - `sync_remote_address_space_enabled`: (Optional) If the peering sync status changes a plan will be created to sync the peering address space with an azapi update resource. Defaults to false.
 - `sync_remote_address_space_triggers`: (Optional) A value that when changed will trigger a resync of the remote address space. This must be supplied if `sync_remote_address_space_enabled` is `true`. Defaults to null.
@@ -404,9 +410,10 @@ variable "subnets" {
     address_prefixes = optional(list(string))
     name             = string
     ipam_pools = optional(list(object({
-      pool_id         = string
-      prefix_length   = optional(number)
-      allocation_type = optional(string, "Static")
+      pool_id                = string
+      number_of_ip_addresses = optional(string)
+      prefix_length          = optional(number)
+      allocation_type        = optional(string, "Static")
     })))
     nat_gateway = optional(object({
       id = string
@@ -415,6 +422,7 @@ variable "subnets" {
       id = string
     }))
     private_endpoint_network_policies             = optional(string, "Enabled")
+    private_endpoint_network_policies_enabled     = optional(bool, true)
     private_link_service_network_policies_enabled = optional(bool, true)
     route_table = optional(object({
       id = string
@@ -422,13 +430,16 @@ variable "subnets" {
     service_endpoint_policies = optional(map(object({
       id = string
     })))
-    service_endpoints = optional(list(string))
+    service_endpoints               = optional(set(string))
+    default_outbound_access_enabled = optional(bool, false)
+    sharing_scope                   = optional(string, null)
+    # Retained solely so that setting it produces an explanatory error instead
+    # of being silently discarded during object type conversion. See the
+    # validation block below. Remove in a future release.
     service_endpoints_with_location = optional(list(object({
       service   = string
       locations = optional(list(string), ["*"])
     })))
-    default_outbound_access_enabled = optional(bool, false)
-    sharing_scope                   = optional(string, null)
     delegations = optional(list(object({
       name = string
       service_delegation = object({
@@ -465,19 +476,19 @@ variable "subnets" {
  - `address_prefixes` - (Optional) The address prefixes to use for the subnet. One of `address_prefix`, `address_prefixes`, or `ipam_pools` must be specified.
  - `ipam_pools` - (Optional) IPAM pools to allocate address space from. When specified, the subnet will request address space from these pools. Each pool configuration supports:
    - `pool_id`: Resource ID of the IPAM pool to allocate from
-   - `prefix_length`: The CIDR prefix length for this subnet (e.g., 24 for /24, 26 for /26)
+   - `number_of_ip_addresses`: (Optional) The number of IP addresses to request from the IPAM pool. If not specified, it will be calculated based on the `prefix_length`.
+   - `prefix_length`: (Optional) The CIDR prefix length for this subnet (e.g., 24 for /24, 26 for /26)
    - `allocation_type`: Type of allocation - "Static" (default) or "Dynamic"
  - `enforce_private_link_endpoint_network_policies` -
  - `enforce_private_link_service_network_policies` -
  - `name` - (Required) The name of the subnet. Changing this forces a new resource to be created.
  - `default_outbound_access_enabled` - (Optional) Whether to allow internet access from the subnet. Defaults to `false`.
- - `private_endpoint_network_policies` - (Optional) Enable or Disable network policies for the private endpoint on the subnet. Possible values are `Disabled`, `Enabled`, `NetworkSecurityGroupEnabled` and `RouteTableEnabled`. Defaults to `Enabled`.
+ - `private_endpoint_network_policies` - (Optional) Enable or Disable network policies for the private endpoint on the subnet. Possible values are `Disabled`, `Enabled`, `NetworkSecurityGroupEnabled` and `RouteTableEnabled`. Defaults to `Enabled`. Only applied when `private_endpoint_network_policies_enabled` is `true`.
+ - `private_endpoint_network_policies_enabled` - (Optional) Controls whether the `privateEndpointNetworkPolicies` property is sent to Azure for the subnet. Defaults to `true`. Set to `false` to omit the property entirely, which is required in regions that do not support it (e.g. South Africa West) because they reject the property outright. Note: unlike `private_link_service_network_policies_enabled` (where `false` sends `Disabled`), setting this to `false` removes the property from the request rather than sending a value; to send `Disabled`, leave this `true` and set `private_endpoint_network_policies = "Disabled"`.
  - `private_link_service_network_policies_enabled` - (Optional) Enable or Disable network policies for the private link service on the subnet. Setting this to `true` will **Enable** the policy and setting this to `false` will **Disable** the policy. Defaults to `true`.
  - `service_endpoint_policies` - (Optional) The map of objects with IDs of Service Endpoint Policies to associate with the subnet.
- - `service_endpoints` - DEPRECATED: (Optional) The list of Service endpoints to associate with the subnet. Possible values include: `Microsoft.AzureActiveDirectory`, `Microsoft.AzureCosmosDB`, `Microsoft.ContainerRegistry`, `Microsoft.EventHub`, `Microsoft.KeyVault`, `Microsoft.ServiceBus`, `Microsoft.Sql`, `Microsoft.Storage`, `Microsoft.Storage.Global` and `Microsoft.Web`. Use `service_endpoints_with_location` instead for the new format with location support.
- - `service_endpoints_with_location` - (Optional) Service endpoints with location restrictions to associate with the subnet. Cannot be used together with `service_endpoints`. Each service endpoint is an object with the following properties:
-   - `service` - (Required) The service name. Possible values include: `Microsoft.AzureActiveDirectory`, `Microsoft.AzureCosmosDB`, `Microsoft.ContainerRegistry`, `Microsoft.EventHub`, `Microsoft.KeyVault`, `Microsoft.ServiceBus`, `Microsoft.Sql`, `Microsoft.Storage`, `Microsoft.Storage.Global` and `Microsoft.Web`.
-   - `locations` - (Optional) A set of Azure region names where the service endpoint should apply. Default is `["*"]` to apply to all regions.
+ - `service_endpoints` - (Optional) A set of service endpoint names to associate with the subnet, for example `["Microsoft.Storage", "Microsoft.Sql"]`. Possible values include: `Microsoft.AzureActiveDirectory`, `Microsoft.AzureCosmosDB`, `Microsoft.ContainerRegistry`, `Microsoft.EventHub`, `Microsoft.KeyVault`, `Microsoft.ServiceBus`, `Microsoft.Sql`, `Microsoft.Storage`, `Microsoft.Storage.Global` and `Microsoft.Web`. Locations are not configurable because Azure implicitly expands service-endpoint locations, which causes perpetual drift.
+ - `service_endpoints_with_location` - **Removed.** Use `service_endpoints` instead. This attribute is still declared so that setting it fails with an explanatory error rather than being silently discarded; setting it is always an error.
 
  ---
  `delegation` (This setting is deprecated, use `delegations` instead) supports the following:
@@ -552,10 +563,9 @@ DESCRIPTION
   }
   validation {
     condition = alltrue([
-      for _, subnet in var.subnets :
-      !(subnet.service_endpoints != null && subnet.service_endpoints_with_location != null)
+      for _, subnet in var.subnets : subnet.service_endpoints_with_location == null
     ])
-    error_message = "Cannot specify both `service_endpoints` and `service_endpoints_with_location` for the same subnet. Use only `service_endpoints_with_location` for the new format with location support."
+    error_message = "`service_endpoints_with_location` has been removed. Use `service_endpoints` with a set of service names instead, for example `service_endpoints = [\"Microsoft.Storage\"]`. Locations are no longer configurable because Azure expands service-endpoint locations implicitly, which caused perpetual drift."
   }
 }
 

@@ -27,7 +27,7 @@ The module supports:
 - Assigning delegations to subnets
 - **IPAM pool allocation for virtual network address space**
 - **IPAM pool allocation for individual subnets**
-- **Mixed IPAM and traditional addressing within the same virtual network**
+- **Choice of IPAM or traditional static addressing per virtual network**
 
 ## IPAM Support
 
@@ -36,8 +36,7 @@ This module provides comprehensive IPAM (IP Address Management) support through 
 ### What IPAM Provides
 - **VNet address space allocation** from centralized IPAM pools
 - **Subnet address allocation** from IPAM pools
-- **Multiple pool support** for IPv4 and IPv6 addressing
-- **Mixed addressing** - combine IPAM and traditional subnets in the same VNet
+- **Dual-stack support** - one IPv4 pool and one IPv6 pool per virtual network
 - **All standard subnet features** work with IPAM subnets (NSGs, service endpoints, delegations, etc.)
 
 ### Benefits
@@ -57,13 +56,87 @@ This module provides comprehensive IPAM (IP Address Management) support through 
 - **[existing\_vnet\_ipam\_subnets](examples/existing\_vnet\_ipam\_subnets/)** - Adding IPAM subnets to existing VNet managed by IPAM
 - **[ipam\_vnet\_only](examples/ipam\_vnet\_only/)** - IPAM VNet creation without subnets
 
+### IPAM Allocation Rules and Sizing
+
+Address space is requested from an IPAM pool as a **single allocation per pool**. The following are enforced by the Azure Resource Provider (they are platform rules, not module limitations):
+
+| Rule | Detail |
+|------|--------|
+| One pool per IP type | At most one IPv4 pool and one IPv6 pool per virtual network. |
+| No duplicate pools | The same pool cannot be referenced more than once on a VNet or subnet. |
+| No IPAM + static mix | A virtual network uses either IPAM pools or a static `address_space`, not both. |
+| Subnet pools are a subset | A subnet may only reference pools that its virtual network already uses. |
+
+**Sizing:** set the size on the single pool entry using either `number_of_ip_addresses` (for example `"256"`) or `prefix_length` (for example `24`). To request more address space from a pool, increase that value - do **not** add a second entry for the same pool.
+
+**Resolved prefixes (summarization vs. fragmentation):** Azure resolves one allocation into one or more CIDR blocks. Contiguous free space is summarized into a single larger prefix (for example two `/21` worth of space surface as one `/20`); fragmented free space is returned as multiple non-adjacent prefixes (for example a single allocation may surface as `/25` + `/28`). This is why one pool can show a varying number of address prefixes. The module exposes these resolved prefixes as a **read-only** output, so summarization or fragmentation does **not** cause Terraform drift.
+
 ## Prerequisites
 
 ### For IPAM Features
 - **Azure Virtual Network Manager**: Required for all IPAM functionality
 - **Supported Azure region**: IPAM must be available in your target region (see [Regional Support](#ipam-regional-support))
-- **azapi provider**: Version ~> 2.4 required for IPAM resource management
+- **azapi provider**: Version ~> 2.11 required for IPAM resource management
 - **Proper permissions**: Network Manager and IPAM pool management permissions
+
+## Migrating from v0.1.x
+
+Version 0.2.0 rewrote the module from `azurerm` resources to `azapi` resources and changed the state layout without shipping `moved` blocks. Current tooling can bridge the resource-type changes: [Terraform v1.8.0](https://github.com/hashicorp/terraform/releases/tag/v1.8.0) added provider-supported moves between resource types, and [AzAPI v2.1.0](https://github.com/Azure/terraform-provider-azapi/releases/tag/v2.1.0) added moves from `azurerm` resources to `azapi_resource`. This module requires Terraform `>= 1.9, < 2.0` and AzAPI `~> 2.11`.
+
+The addresses below were verified against Terraform's move validation and AzAPI's cross-type state conversion using a synthetic v0.1.x state, but the migration has not been applied end to end against a real v0.1.3 deployment. Back up the state first, treat the addresses below as templates, and verify them against `terraform state list`.
+
+### Move retained resources
+
+Write the `moved` blocks in the root configuration that calls this module, not in the module source. Replace `module.vnet` with the actual module address and repeat the keyed blocks for every subnet and peering. The current configuration must use the existing Azure resource names: set each subnet `name` to its old map key and each peering `name` to the old generated value `peering-<key>`.
+
+```terraform
+moved {
+  from = module.vnet.azurerm_virtual_network.vnet
+  to   = module.vnet.azapi_resource.vnet
+}
+
+moved {
+  from = module.vnet.azurerm_subnet.subnet["subnet_key"]
+  to   = module.vnet.module.subnet["subnet_key"].azapi_resource.subnet
+}
+
+moved {
+  from = module.vnet.azurerm_virtual_network_peering.vnet_peering["peering_key"]
+  to   = module.vnet.module.peering["peering_key"].azapi_resource.this[0]
+}
+```
+
+The static subnet destination is deliberately unindexed. The subnet submodule already declares `moved { from = azapi_resource.subnet, to = azapi_resource.subnet[0] }` for the v0.15.0 IPAM change, and Terraform rejects two statements that move into the same instance with an `Ambiguous move statements` error. Targeting the unindexed address lets Terraform chain the two moves. If the target subnet uses `ipam_pools`, target `module.vnet.module.subnet["subnet_key"].azapi_resource.subnet_ipam[0]` instead; that address is indexed because no such chained move exists for it. The peering destination is for the full-virtual-network peering used by v0.1.x and selected by the current default `peer_complete_vnets = true`.
+
+### Remove resources folded into parent bodies
+
+These v0.1.x resources have no destination address because v0.2.0 folded them into the virtual network or subnet body. Configure the equivalent current input first, then use `terraform state rm` for each address that exists:
+
+| State address | Equivalent current configuration |
+|---------------|----------------------------------|
+| `module.vnet.azurerm_virtual_network_dns_servers.vnet_dns[0]` | `dns_servers` on the virtual network |
+| `module.vnet.azurerm_subnet_network_security_group_association.vnet["subnet_key"]` | `subnets["subnet_key"].network_security_group` |
+| `module.vnet.azurerm_subnet_route_table_association.vnet["subnet_key"]` | `subnets["subnet_key"].route_table` |
+| `module.vnet.azurerm_subnet_nat_gateway_association.nat_gw["subnet_key"]` | `subnets["subnet_key"].nat_gateway` |
+
+Do not remove an association from state until the current subnet configuration contains the same NSG, route table, or NAT gateway ID. Otherwise, a later subnet update can remove that association from Azure.
+
+### Review the first plan
+
+AzAPI's cross-type state conversion initializes `id`, `name`, `parent_id`, and `type`, but not `body`. The first plan after adding the moves therefore shows the configured body being reconciled; this is expected. Review and adjust the configuration until the plan contains only the expected state moves and in-place updates.
+
+**Never apply a plan that replaces the virtual network, subnets, or peerings.** After applying the reviewed in-place migration, run `terraform plan` again and iterate until it reports no changes. If a non-replacing plan cannot be established, importing the existing resources into a fresh configuration and state remains the conservative alternative.
+
+Later releases introduced these additional breaking changes:
+
+| Version | Breaking change |
+|---------|-----------------|
+| [v0.11.0](https://github.com/Azure/terraform-azurerm-avm-res-network-virtualnetwork/releases/tag/v0.11.0) | Removed `resource_group_name` and `subscription_id`; supply the resource group resource ID with `parent_id`. |
+| [v0.12.0](https://github.com/Azure/terraform-azurerm-avm-res-network-virtualnetwork/releases/tag/v0.12.0) | Removed the `retry` options `multiplier` and `randomization_factor`, including nested subnet and peering retry objects. |
+| [v0.15.0](https://github.com/Azure/terraform-azurerm-avm-res-network-virtualnetwork/releases/tag/v0.15.0) | Removed `service_endpoints` in favor of `service_endpoints_with_location`, and required a `moved` block for existing IPAM subnets. Reversed in v0.20.0: `service_endpoints` is supported again with names only, while `service_endpoints_with_location` now raises a validation error. |
+| [v0.19.0](https://github.com/Azure/terraform-azurerm-avm-res-network-virtualnetwork/releases/tag/v0.19.0) | Moved locks, role assignments, and diagnostic settings from `azurerm` to `azapi`. Locks and diagnostic settings migrate through `moved` blocks; role assignments are recreated once. |
+
+Use [GitHub Releases](https://github.com/Azure/terraform-azurerm-avm-res-network-virtualnetwork/releases) as the authoritative changelog for all versions.
 
 ## Usage
 
@@ -162,6 +235,11 @@ module "avm-res-network-subnet" {
 - **"Network Manager not found"**: Ensure Azure Virtual Network Manager exists before creating IPAM pools
 - **"Subnet overlap errors"**: Module uses retry logic to handle allocation conflicts automatically
 - **"Pool exhausted"**: Check that your IPAM pool has sufficient available address space for the requested subnets
+- **`CannotHaveDuplicatePoolIds`**: The same pool is referenced more than once. Use a single `ipam_pools` entry and increase `number_of_ip_addresses` instead of adding duplicate entries.
+- **`only one association of each IP type is allowed`**: Only one IPv4 pool and one IPv6 pool are permitted per virtual network. Remove the additional same-family pool.
+- **`CannotMixAddressPrefixAndPoolInPayload`**: A virtual network cannot combine IPAM pools with a static `address_space`. Choose one addressing model.
+- **`SubnetPoolsMustBeSubsetOfVnetPools`**: A subnet references a pool that its virtual network does not use. Reference the pool on the VNet first.
+- **A single pool shows multiple or changing address prefixes**: Expected behavior. One allocation is resolved into one or more CIDRs (summarized when contiguous, split when fragmented). These resolved prefixes are read-only and do not cause Terraform drift.
 ```
 ```
 
@@ -172,9 +250,7 @@ The following requirements are needed by this module:
 
 - <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) (>= 1.9, < 2.0)
 
-- <a name="requirement_azapi"></a> [azapi](#requirement\_azapi) (~> 2.4)
-
-- <a name="requirement_azurerm"></a> [azurerm](#requirement\_azurerm) (~> 4.0)
+- <a name="requirement_azapi"></a> [azapi](#requirement\_azapi) (~> 2.11)
 
 - <a name="requirement_modtm"></a> [modtm](#requirement\_modtm) (~> 0.3)
 
@@ -184,10 +260,10 @@ The following requirements are needed by this module:
 
 The following resources are used by this module:
 
+- [azapi_resource.diagnostic_settings](https://registry.terraform.io/providers/Azure/azapi/latest/docs/resources/resource) (resource)
+- [azapi_resource.lock](https://registry.terraform.io/providers/Azure/azapi/latest/docs/resources/resource) (resource)
+- [azapi_resource.role_assignments](https://registry.terraform.io/providers/Azure/azapi/latest/docs/resources/resource) (resource)
 - [azapi_resource.vnet](https://registry.terraform.io/providers/Azure/azapi/latest/docs/resources/resource) (resource)
-- [azurerm_management_lock.this](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/management_lock) (resource)
-- [azurerm_monitor_diagnostic_setting.this](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/monitor_diagnostic_setting) (resource)
-- [azurerm_role_assignment.vnet_level](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/role_assignment) (resource)
 - [modtm_telemetry.telemetry](https://registry.terraform.io/providers/azure/modtm/latest/docs/resources/telemetry) (resource)
 - [random_uuid.telemetry](https://registry.terraform.io/providers/hashicorp/random/latest/docs/resources/uuid) (resource)
 - [azapi_client_config.telemetry](https://registry.terraform.io/providers/Azure/azapi/latest/docs/data-sources/client_config) (data source)
@@ -368,14 +444,16 @@ Default: `null`
 Description: (Optional) Specifies the IPAM settings for requesting an address\_space from an IP Pool. Only one IPv4 and one IPv6 pool can be specified.
 
 - `id`: The ID of the IPAM pool.
-- `prefix_length`: The length of the /XX CIDR range to request. for example 24 for a /24. Prefix length must be between 2 and 29 for IPv4 and 48 and 64 for IPv6.
+- `number_of_ip_addresses`: (Optional) The number of IP addresses to request from the IPAM pool. If not specified, it will be calculated based on the `prefix_length`.
+- `prefix_length`: (Optional) The length of the /XX CIDR range to request. for example 24 for a /24. Prefix length must be between 2 and 29 for IPv4 and 48 and 64 for IPv6.
 
 Type:
 
 ```hcl
 list(object({
-    id            = string
-    prefix_length = number
+    id                     = string
+    number_of_ip_addresses = optional(string)
+    prefix_length          = optional(number)
   }))
 ```
 
@@ -418,11 +496,11 @@ Description: (Optional) A map of virtual network peering configurations. Each en
 - `allow_virtual_network_access`: (Optional) Enables access from the local virtual network to the remote virtual network. Defaults to true.
 - `do_not_verify_remote_gateways`: (Optional) Disables the verification of remote gateways for the virtual networks. Defaults to false.
 - `enable_only_ipv6_peering`: (Optional) Enables only IPv6 peering for the virtual networks. Defaults to false.
-- `peer_complete_vnets`: (Optional) Enables the peering of complete virtual networks for the virtual networks. Defaults to false.
-- `local_peered_address_spaces`: (Optional) The address spaces to peer with the remote virtual network. Only used when `peer_complete_vnets` is set to true.
-- `remote_peered_address_spaces`: (Optional) The address spaces to peer from the remote virtual network. Only used when `peer_complete_vnets` is set to true.
-- `local_peered_subnets`: (Optional) The subnets to peer with the remote virtual network. Only used when `peer_complete_vnets` is set to true.
-- `remote_peered_subnets`: (Optional) The subnets to peer from the remote virtual network. Only used when `peer_complete_vnets` is set to true.
+- `peer_complete_vnets`: (Optional) Enables the peering of complete virtual networks for the virtual networks. Defaults to true.
+- `local_peered_address_spaces`: (Optional) The address spaces to peer with the remote virtual network. Only used when `peer_complete_vnets` is set to false.
+- `remote_peered_address_spaces`: (Optional) The address spaces to peer from the remote virtual network. Only used when `peer_complete_vnets` is set to false.
+- `local_peered_subnets`: (Optional) The subnets to peer with the remote virtual network. Only used when `peer_complete_vnets` is set to false.
+- `remote_peered_subnets`: (Optional) The subnets to peer from the remote virtual network. Only used when `peer_complete_vnets` is set to false.
 - `use_remote_gateways`: (Optional) Enables the use of remote gateways for the virtual networks. Defaults to false.
 - `create_reverse_peering`: (Optional) Creates the reverse peering to form a complete peering.
 - `reverse_name`: (Optional) If you have selected `create_reverse_peering`, then this name will be used for the reverse peer.
@@ -431,11 +509,11 @@ Description: (Optional) A map of virtual network peering configurations. Each en
 - `reverse_allow_virtual_network_access`: (Optional) If you have selected `create_reverse_peering`, enables access from the local virtual network to the remote virtual network. Defaults to true.
 - `reverse_do_not_verify_remote_gateways`: (Optional) If you have selected `create_reverse_peering`, disables the verification of remote gateways for the virtual networks. Defaults to false.
 - `reverse_enable_only_ipv6_peering`: (Optional) If you have selected `create_reverse_peering`, enables only IPv6 peering for the virtual networks. Defaults to false.
-- `reverse_peer_complete_vnets`: (Optional) If you have selected `create_reverse_peering`, enables the peering of complete virtual networks for the virtual networks. Defaults to false.
-- `reverse_local_peered_address_spaces`: (Optional) If you have selected `create_reverse_peering`, the address spaces to peer with the remote virtual network. Only used when `reverse_peer_complete_vnets` is set to true.
-- `reverse_remote_peered_address_spaces`: (Optional) If you have selected `create_reverse_peering`, the address spaces to peer from the remote virtual network. Only used when `reverse_peer_complete_vnets` is set to true.
-- `reverse_local_peered_subnets`: (Optional) If you have selected `create_reverse_peering`, the subnets to peer with the remote virtual network. Only used when `reverse_peer_complete_vnets` is set to true.
-- `reverse_remote_peered_subnets`: (Optional) If you have selected `create_reverse_peering`, the subnets to peer from the remote virtual network. Only used when `reverse_peer_complete_vnets` is set to true.
+- `reverse_peer_complete_vnets`: (Optional) If you have selected `create_reverse_peering`, enables the peering of complete virtual networks for the virtual networks. Defaults to true.
+- `reverse_local_peered_address_spaces`: (Optional) If you have selected `create_reverse_peering`, the address spaces to peer with the remote virtual network. Only used when `reverse_peer_complete_vnets` is set to false.
+- `reverse_remote_peered_address_spaces`: (Optional) If you have selected `create_reverse_peering`, the address spaces to peer from the remote virtual network. Only used when `reverse_peer_complete_vnets` is set to false.
+- `reverse_local_peered_subnets`: (Optional) If you have selected `create_reverse_peering`, the subnets to peer with the remote virtual network. Only used when `reverse_peer_complete_vnets` is set to false.
+- `reverse_remote_peered_subnets`: (Optional) If you have selected `create_reverse_peering`, the subnets to peer from the remote virtual network. Only used when `reverse_peer_complete_vnets` is set to false.
 - `reverse_use_remote_gateways`: (Optional) If you have selected `create_reverse_peering`, enables the use of remote gateways for the virtual networks. Defaults to false.
 - `sync_remote_address_space_enabled`: (Optional) If the peering sync status changes a plan will be created to sync the peering address space with an azapi update resource. Defaults to false.
 - `sync_remote_address_space_triggers`: (Optional) A value that when changed will trigger a resync of the remote address space. This must be supplied if `sync_remote_address_space_enabled` is `true`. Defaults to null.
@@ -574,19 +652,19 @@ Description: (Optional) A map of subnets to create
  - `address_prefixes` - (Optional) The address prefixes to use for the subnet. One of `address_prefix`, `address_prefixes`, or `ipam_pools` must be specified.
  - `ipam_pools` - (Optional) IPAM pools to allocate address space from. When specified, the subnet will request address space from these pools. Each pool configuration supports:
    - `pool_id`: Resource ID of the IPAM pool to allocate from
-   - `prefix_length`: The CIDR prefix length for this subnet (e.g., 24 for /24, 26 for /26)
+   - `number_of_ip_addresses`: (Optional) The number of IP addresses to request from the IPAM pool. If not specified, it will be calculated based on the `prefix_length`.
+   - `prefix_length`: (Optional) The CIDR prefix length for this subnet (e.g., 24 for /24, 26 for /26)
    - `allocation_type`: Type of allocation - "Static" (default) or "Dynamic"
  - `enforce_private_link_endpoint_network_policies` -
  - `enforce_private_link_service_network_policies` -
  - `name` - (Required) The name of the subnet. Changing this forces a new resource to be created.
  - `default_outbound_access_enabled` - (Optional) Whether to allow internet access from the subnet. Defaults to `false`.
- - `private_endpoint_network_policies` - (Optional) Enable or Disable network policies for the private endpoint on the subnet. Possible values are `Disabled`, `Enabled`, `NetworkSecurityGroupEnabled` and `RouteTableEnabled`. Defaults to `Enabled`.
+ - `private_endpoint_network_policies` - (Optional) Enable or Disable network policies for the private endpoint on the subnet. Possible values are `Disabled`, `Enabled`, `NetworkSecurityGroupEnabled` and `RouteTableEnabled`. Defaults to `Enabled`. Only applied when `private_endpoint_network_policies_enabled` is `true`.
+ - `private_endpoint_network_policies_enabled` - (Optional) Controls whether the `privateEndpointNetworkPolicies` property is sent to Azure for the subnet. Defaults to `true`. Set to `false` to omit the property entirely, which is required in regions that do not support it (e.g. South Africa West) because they reject the property outright. Note: unlike `private_link_service_network_policies_enabled` (where `false` sends `Disabled`), setting this to `false` removes the property from the request rather than sending a value; to send `Disabled`, leave this `true` and set `private_endpoint_network_policies = "Disabled"`.
  - `private_link_service_network_policies_enabled` - (Optional) Enable or Disable network policies for the private link service on the subnet. Setting this to `true` will **Enable** the policy and setting this to `false` will **Disable** the policy. Defaults to `true`.
  - `service_endpoint_policies` - (Optional) The map of objects with IDs of Service Endpoint Policies to associate with the subnet.
- - `service_endpoints` - DEPRECATED: (Optional) The list of Service endpoints to associate with the subnet. Possible values include: `Microsoft.AzureActiveDirectory`, `Microsoft.AzureCosmosDB`, `Microsoft.ContainerRegistry`, `Microsoft.EventHub`, `Microsoft.KeyVault`, `Microsoft.ServiceBus`, `Microsoft.Sql`, `Microsoft.Storage`, `Microsoft.Storage.Global` and `Microsoft.Web`. Use `service_endpoints_with_location` instead for the new format with location support.
- - `service_endpoints_with_location` - (Optional) Service endpoints with location restrictions to associate with the subnet. Cannot be used together with `service_endpoints`. Each service endpoint is an object with the following properties:
-   - `service` - (Required) The service name. Possible values include: `Microsoft.AzureActiveDirectory`, `Microsoft.AzureCosmosDB`, `Microsoft.ContainerRegistry`, `Microsoft.EventHub`, `Microsoft.KeyVault`, `Microsoft.ServiceBus`, `Microsoft.Sql`, `Microsoft.Storage`, `Microsoft.Storage.Global` and `Microsoft.Web`.
-   - `locations` - (Optional) A set of Azure region names where the service endpoint should apply. Default is `["*"]` to apply to all regions.
+ - `service_endpoints` - (Optional) A set of service endpoint names to associate with the subnet, for example `["Microsoft.Storage", "Microsoft.Sql"]`. Possible values include: `Microsoft.AzureActiveDirectory`, `Microsoft.AzureCosmosDB`, `Microsoft.ContainerRegistry`, `Microsoft.EventHub`, `Microsoft.KeyVault`, `Microsoft.ServiceBus`, `Microsoft.Sql`, `Microsoft.Storage`, `Microsoft.Storage.Global` and `Microsoft.Web`. Locations are not configurable because Azure implicitly expands service-endpoint locations, which causes perpetual drift.
+ - `service_endpoints_with_location` - **Removed.** Use `service_endpoints` instead. This attribute is still declared so that setting it fails with an explanatory error rather than being silently discarded; setting it is always an error.
 
  ---
  `delegation` (This setting is deprecated, use `delegations` instead) supports the following:
@@ -641,9 +719,10 @@ map(object({
     address_prefixes = optional(list(string))
     name             = string
     ipam_pools = optional(list(object({
-      pool_id         = string
-      prefix_length   = optional(number)
-      allocation_type = optional(string, "Static")
+      pool_id                = string
+      number_of_ip_addresses = optional(string)
+      prefix_length          = optional(number)
+      allocation_type        = optional(string, "Static")
     })))
     nat_gateway = optional(object({
       id = string
@@ -652,6 +731,7 @@ map(object({
       id = string
     }))
     private_endpoint_network_policies             = optional(string, "Enabled")
+    private_endpoint_network_policies_enabled     = optional(bool, true)
     private_link_service_network_policies_enabled = optional(bool, true)
     route_table = optional(object({
       id = string
@@ -659,13 +739,16 @@ map(object({
     service_endpoint_policies = optional(map(object({
       id = string
     })))
-    service_endpoints = optional(list(string))
+    service_endpoints               = optional(set(string))
+    default_outbound_access_enabled = optional(bool, false)
+    sharing_scope                   = optional(string, null)
+    # Retained solely so that setting it produces an explanatory error instead
+    # of being silently discarded during object type conversion. See the
+    # validation block below. Remove in a future release.
     service_endpoints_with_location = optional(list(object({
       service   = string
       locations = optional(list(string), ["*"])
     })))
-    default_outbound_access_enabled = optional(bool, false)
-    sharing_scope                   = optional(string, null)
     delegations = optional(list(object({
       name = string
       service_delegation = object({
@@ -758,6 +841,12 @@ Please refer to the subnet module documentation for details of the outputs
 ## Modules
 
 The following Modules are called:
+
+### <a name="module_interfaces"></a> [interfaces](#module\_interfaces)
+
+Source: Azure/avm-utl-interfaces/azure
+
+Version: 0.6.0
 
 ### <a name="module_peering"></a> [peering](#module\_peering)
 
