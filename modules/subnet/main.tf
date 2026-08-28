@@ -5,7 +5,7 @@ resource "azapi_resource" "subnet" {
   parent_id = var.parent_id
   type      = "Microsoft.Network/virtualNetworks/subnets@2024-07-01"
   body = {
-    properties = {
+    properties = merge({
       addressPrefix         = var.ipam_pools == null ? var.address_prefix : null
       addressPrefixes       = var.ipam_pools == null ? var.address_prefixes : null
       delegations           = local.delegations
@@ -16,15 +16,13 @@ resource "azapi_resource" "subnet" {
       networkSecurityGroup = var.network_security_group != null ? {
         id = var.network_security_group.id
       } : null
-      privateEndpointNetworkPolicies    = var.private_endpoint_network_policies
       privateLinkServiceNetworkPolicies = var.private_link_service_network_policies_enabled == false ? "Disabled" : "Enabled"
       routeTable = var.route_table != null ? {
         id = var.route_table.id
       } : null
-      serviceEndpoints = var.service_endpoints_with_location != null ? [
-        for service_endpoint in var.service_endpoints_with_location : {
-          service   = service_endpoint.service
-          locations = service_endpoint.locations
+      serviceEndpoints = var.service_endpoints != null ? [
+        for service_endpoint in var.service_endpoints : {
+          service = service_endpoint
         }
       ] : null
       serviceEndpointPolicies = var.service_endpoint_policies != null ? [
@@ -33,12 +31,17 @@ resource "azapi_resource" "subnet" {
         }
       ] : null
       sharingScope = var.sharing_scope
-    }
+      }, var.private_endpoint_network_policies_enabled ? {
+      privateEndpointNetworkPolicies = var.private_endpoint_network_policies
+    } : {})
   }
   locks                     = [var.parent_id]
+  list_unique_id_property   = { "properties.serviceEndpoints" = "service" }
   response_export_values    = ["properties.addressPrefixes", "properties.addressPrefix"]
   retry                     = var.retry
   schema_validation_enabled = true
+  ignore_missing_property   = false
+  ignore_body_changes       = length(var.ignore_body_changes.virtual_networks_subnets) > 0 ? var.ignore_body_changes.virtual_networks_subnets : null
 
   timeouts {
     create = var.timeouts.create
@@ -53,15 +56,37 @@ moved {
   to   = azapi_resource.subnet[0]
 }
 
-resource "azurerm_role_assignment" "subnet" {
-  for_each = var.role_assignments
+resource "azapi_resource" "role_assignments" {
+  for_each = module.interfaces.role_assignments_azapi
 
-  principal_id                           = each.value.principal_id
-  scope                                  = local.ipam_enabled ? azapi_resource.subnet_ipam[0].id : azapi_resource.subnet[0].id
-  condition                              = each.value.condition
-  condition_version                      = each.value.condition_version
-  delegated_managed_identity_resource_id = each.value.delegated_managed_identity_resource_id
-  role_definition_id                     = strcontains(lower(each.value.role_definition_id_or_name), lower(local.role_definition_resource_substring)) ? each.value.role_definition_id_or_name : null
-  role_definition_name                   = strcontains(lower(each.value.role_definition_id_or_name), lower(local.role_definition_resource_substring)) ? null : each.value.role_definition_id_or_name
-  skip_service_principal_aad_check       = each.value.skip_service_principal_aad_check
+  name                   = each.value.name
+  parent_id              = local.ipam_enabled ? azapi_resource.subnet_ipam[0].id : azapi_resource.subnet[0].id
+  type                   = each.value.type
+  body                   = each.value.body
+  ignore_null_property   = true
+  response_export_values = []
+  retry                  = var.retry
+
+  # Role assignment names are immutable GUIDs in Azure; they are never renamed,
+  # only replaced. Ignoring changes to `name` prevents a destroy/recreate (and the
+  # associated RBAC outage) on upgrade, when the moved-in azurerm name is not yet
+  # known to the upstream random_uuid resource. See issue #137.
+  lifecycle {
+    ignore_changes = [name]
+  }
+}
+
+# Shared AVM interfaces (role assignments) transformed into azapi resource
+# payloads via the avm-utl-interfaces utility module.
+module "interfaces" {
+  source  = "git::https://avm.mirror.invalid/terraform-azure-avm-utl-interfaces.git?ref=v0.6.0-local"
+
+  enable_telemetry                 = false
+  role_assignment_definition_scope = local.role_assignment_definition_scope
+  role_assignments                 = var.role_assignments
+}
+
+moved {
+  from = azurerm_role_assignment.subnet
+  to   = azapi_resource.role_assignments
 }

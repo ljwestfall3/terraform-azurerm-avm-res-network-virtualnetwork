@@ -25,6 +25,11 @@ variable "address_prefix" {
   description = <<DESCRIPTION
 (Optional) The address prefix for the subnet. One of `address_prefix`, `address_prefixes`, or `ipam_pools` must be supplied.
 DESCRIPTION
+
+  validation {
+    condition     = var.address_prefix == null ? true : can(cidrhost(var.address_prefix, 0))
+    error_message = "`address_prefix` must be a valid CIDR block, for example \"10.0.0.0/24\"."
+  }
 }
 
 variable "address_prefixes" {
@@ -33,6 +38,11 @@ variable "address_prefixes" {
   description = <<DESCRIPTION
 (Optional) The address prefixes for the subnet. You can supply more than one address prefix. One of `address_prefix`, `address_prefixes`, or `ipam_pools` must be supplied.
 DESCRIPTION
+
+  validation {
+    condition     = var.address_prefixes == null ? true : alltrue([for cidr in var.address_prefixes : can(cidrhost(cidr, 0))])
+    error_message = "Each entry in `address_prefixes` must be a valid CIDR block, for example \"10.0.0.0/24\"."
+  }
 }
 
 variable "default_outbound_access_enabled" {
@@ -44,6 +54,39 @@ variable "default_outbound_access_enabled" {
 More details here: https://learn.microsoft.com/en-gb/azure/virtual-network/ip-services/default-outbound-access
 DESCRIPTION
   nullable    = false
+}
+
+variable "ignore_body_changes" {
+  type = object({
+    virtual_networks_subnets = optional(list(string), [])
+  })
+  default     = {}
+  description = <<DESCRIPTION
+(Optional) Subnet body property paths (dot notation, relative to the request body) whose changes the `azapi` provider should ignore after creation. Use this to let out-of-band controllers own specific subnet properties without producing perpetual `terraform plan` drift.
+
+- `virtual_networks_subnets` - The list of ignored body paths for the subnet managed by this module.
+
+The canonical use case is Azure Virtual Network Manager (AVNM) `ManagedOnly` routing configurations or Azure Policy `DeployIfNotExists` policies that attach a route table to the subnet out-of-band. Set `virtual_networks_subnets = ["properties.routeTable"]` so Terraform stops re-asserting `routeTable` and the external association survives subsequent plans.
+
+Common paths:
+- `properties.routeTable` - route table association (AVNM / Policy DINE)
+- `properties.networkSecurityGroup` - network security group association
+- `properties.serviceEndpoints` - service endpoints
+- `properties.delegations` - subnet delegations
+- `tags` - top-level tags applied out-of-band
+
+Notes:
+- Paths use dot notation and are relative to the subnet request body. Individual list items cannot be targeted; ignore the whole list property instead.
+- **Important:** several of these properties are also settable through dedicated module inputs (for example `route_table`, `network_security_group`, `service_endpoints`, `delegations`). When you ignore a path so an out-of-band controller can own it, leave the corresponding input unset - do not manage the same property from both places, or the module and the external controller will fight over it.
+- This is a write-only argument stored in provider-private state, so changes to it take effect only after an `apply` (a non-empty value requires Terraform >= 1.11).
+- While a path is ignored, configuration changes at that path are not sent to Azure until the path is removed from this list.
+DESCRIPTION
+  nullable    = false
+
+  validation {
+    condition     = alltrue([for path in var.ignore_body_changes.virtual_networks_subnets : length(trimspace(path)) > 0])
+    error_message = "Every ignore_body_changes.virtual_networks_subnets entry must be a non-empty body path (for example \"properties.routeTable\" or \"tags\"). Paths are relative to the subnet request body and use dot notation."
+  }
 }
 
 variable "delegation" {
@@ -82,15 +125,17 @@ DESCRIPTION
 
 variable "ipam_pools" {
   type = list(object({
-    pool_id       = string
-    prefix_length = number
+    pool_id                = string
+    number_of_ip_addresses = optional(string)
+    prefix_length          = optional(number)
   }))
   default     = null
   description = <<DESCRIPTION
 (Optional) A list of IPAM pools to allocate subnet address space from. Each pool supports the following:
 
 - `pool_id` - (Required) The ID of the IPAM pool to allocate from.
-- `prefix_length` - (Required) The prefix length for the subnet allocation (e.g., 24 for a /24 subnet).
+- `number_of_ip_addresses` - (Optional) The number of IP addresses to request from the IPAM pool. If not specified, it will be calculated based on the `prefix_length`.
+- `prefix_length` - (Optional) The prefix length for the subnet allocation (e.g., 24 for a /24 subnet). Required if `number_of_ip_addresses` is not specified.
 
 Note: Only one IPAM pool allocation per subnet is currently supported. When using IPAM pools, do not specify `address_prefix` or `address_prefixes`.
 DESCRIPTION
@@ -100,8 +145,8 @@ DESCRIPTION
     error_message = "Only one IPAM pool allocation per subnet is supported."
   }
   validation {
-    condition     = var.ipam_pools == null ? true : alltrue([for pool in var.ipam_pools : pool.prefix_length >= 16 && pool.prefix_length <= 30])
-    error_message = "IPAM pool prefix_length must be between 16 and 30 for IPv4 subnets."
+    condition     = var.ipam_pools == null ? true : alltrue([for pool in var.ipam_pools : pool.number_of_ip_addresses != null || (pool.prefix_length != null && pool.prefix_length >= 16 && pool.prefix_length <= 30)])
+    error_message = "Either number_of_ip_addresses or a prefix_length between 16 and 30 must be specified for each IPAM pool."
   }
 }
 
@@ -130,6 +175,8 @@ variable "private_endpoint_network_policies" {
   default     = "Enabled"
   description = <<DESCRIPTION
 (Optional) Enable or Disable network policies for the private endpoint on the subnet. Possible values are `Disabled`, `Enabled`, `NetworkSecurityGroupEnabled` and `RouteTableEnabled`. Defaults to `Enabled`.
+
+This value is only applied when `private_endpoint_network_policies_enabled` is `true`. Set `private_endpoint_network_policies_enabled` to `false` to omit the `privateEndpointNetworkPolicies` property from the request entirely (required in regions that do not support it, e.g. South Africa West).
 DESCRIPTION
   nullable    = false
 
@@ -137,6 +184,19 @@ DESCRIPTION
     condition     = can(regex("^(Disabled|Enabled|NetworkSecurityGroupEnabled|RouteTableEnabled)$", var.private_endpoint_network_policies))
     error_message = "private_endpoint_network_policies must be one of Disabled, Enabled, NetworkSecurityGroupEnabled, or RouteTableEnabled."
   }
+}
+
+variable "private_endpoint_network_policies_enabled" {
+  type        = bool
+  default     = true
+  description = <<DESCRIPTION
+(Optional) Controls whether the `privateEndpointNetworkPolicies` property is sent to Azure for the subnet. Defaults to `true`.
+
+When `true`, the value of `private_endpoint_network_policies` is applied. When `false`, the property is omitted from the request entirely, which is required in regions that do not support it (e.g. South Africa West) because they reject the property outright.
+
+Note: unlike `private_link_service_network_policies_enabled` (where `false` sends `"Disabled"`), setting this to `false` removes the property from the request rather than sending a value. To send `"Disabled"`, leave this `true` and set `private_endpoint_network_policies = "Disabled"`.
+DESCRIPTION
+  nullable    = false
 }
 
 variable "private_link_service_network_policies_enabled" {
@@ -215,6 +275,20 @@ variable "service_endpoint_policies" {
 DESCRIPTION
 }
 
+variable "service_endpoints" {
+  type        = set(string)
+  default     = null
+  description = <<DESCRIPTION
+(Optional) A set of service endpoints to associate with the subnet, specified as a set of service names (e.g. `["Microsoft.Storage", "Microsoft.Sql"]`).
+
+Locations are intentionally not configurable: Azure implicitly expands service-endpoint locations (for example, `Microsoft.Storage` in a region adds its paired region), which caused perpetual drift when locations were sent explicitly. See issues #22 and #39.
+DESCRIPTION
+}
+
+# The variable is intentionally unused beyond its own validation: it exists
+# solely so that setting the removed argument fails with a message naming the
+# replacement, instead of Terraform's generic "unexpected argument" error.
+# tflint-ignore: terraform_unused_declarations
 variable "service_endpoints_with_location" {
   type = list(object({
     service   = string
@@ -222,18 +296,14 @@ variable "service_endpoints_with_location" {
   }))
   default     = null
   description = <<DESCRIPTION
-(Optional) A set of service endpoints with location restrictions to associate with the subnet. Each service endpoint is an object with the following properties:
-- `service` - (Required) The service name. Changing this forces a new resource to be created.
-- `locations` - (Optional) A set of Azure region names where the service endpoint should apply. Default is `["*"]`, which means the service endpoint applies to all regions. If you want to restrict the service endpoint to specific regions, you can provide a set of region names. Changing this forces a new resource to be created.
+**Removed.** Use `service_endpoints` instead, which takes a set of service names.
+
+This variable is still declared so that configurations which set it fail with an explanatory error naming the replacement, rather than the generic "unexpected argument" error. Setting it is always an error. It will be removed entirely in a future release.
 DESCRIPTION
 
   validation {
-    error_message = "Locations values must be unique"
-    condition     = var.service_endpoints_with_location != null ? alltrue([for endpoint in var.service_endpoints_with_location : length(toset(endpoint.locations)) == length(endpoint.locations)]) : true
-  }
-  validation {
-    error_message = "Service names must be unique"
-    condition     = var.service_endpoints_with_location != null ? length([for endpoint in var.service_endpoints_with_location : endpoint.service]) == length(toset([for endpoint in var.service_endpoints_with_location : endpoint.service])) : true
+    condition     = var.service_endpoints_with_location == null
+    error_message = "`service_endpoints_with_location` has been removed. Use `service_endpoints` with a set of service names instead, for example `service_endpoints = [\"Microsoft.Storage\"]`. Locations are no longer configurable because Azure expands service-endpoint locations implicitly, which caused perpetual drift."
   }
 }
 

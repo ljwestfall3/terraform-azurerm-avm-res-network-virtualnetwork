@@ -44,6 +44,29 @@ variable "allow_gateway_transit" {
   nullable    = false
 }
 
+variable "ignore_body_changes" {
+  type = object({
+    virtual_networks_virtual_network_peerings = optional(list(string), [])
+  })
+  default     = {}
+  description = <<DESCRIPTION
+(Optional) Peering body property paths (dot notation, relative to the request body) whose changes the `azapi` provider should ignore after creation, letting an out-of-band controller own those properties without producing perpetual `terraform plan` drift.
+
+- `virtual_networks_virtual_network_peerings` - The list of ignored body paths, applied to every peering resource this submodule manages.
+
+Notes:
+- Paths use dot notation and are relative to the peering request body. Individual list items cannot be targeted; ignore the whole list property instead.
+- This is a write-only argument stored in provider-private state, so changes to it take effect only after an `apply` (a non-empty value requires Terraform >= 1.11).
+- While a path is ignored, configuration changes at that path are not sent to Azure until the path is removed from this list.
+DESCRIPTION
+  nullable    = false
+
+  validation {
+    condition     = alltrue([for path in var.ignore_body_changes.virtual_networks_virtual_network_peerings : length(trimspace(path)) > 0])
+    error_message = "Every ignore_body_changes.virtual_networks_virtual_network_peerings entry must be a non-empty body path. Paths are relative to the peering request body and use dot notation."
+  }
+}
+
 variable "allow_virtual_network_access" {
   type        = bool
   default     = true
@@ -78,6 +101,11 @@ variable "local_peered_address_spaces" {
   }))
   default     = []
   description = "The address space of the local virtual network to peer. Only relevant if peer_complete_vnets is false"
+
+  validation {
+    condition     = alltrue([for a in(var.local_peered_address_spaces == null ? [] : var.local_peered_address_spaces) : can(cidrhost(a.address_prefix, 0))])
+    error_message = "Each `address_prefix` in `local_peered_address_spaces` must be a valid CIDR block, for example \"10.0.0.0/24\"."
+  }
 }
 
 variable "local_peered_subnets" {
@@ -110,6 +138,11 @@ variable "remote_peered_address_spaces" {
   }))
   default     = []
   description = "The address space of the remote virtual network to peer. Only relevant if peer_complete_vnets is false"
+
+  validation {
+    condition     = alltrue([for a in(var.remote_peered_address_spaces == null ? [] : var.remote_peered_address_spaces) : can(cidrhost(a.address_prefix, 0))])
+    error_message = "Each `address_prefix` in `remote_peered_address_spaces` must be a valid CIDR block, for example \"10.0.0.0/24\"."
+  }
 }
 
 variable "remote_peered_subnets" {
@@ -171,6 +204,11 @@ variable "reverse_local_peered_address_spaces" {
   }))
   default     = []
   description = "The address space of the remote virtual network to peer. Only relevant if reverse_peer_complete_vnets is false"
+
+  validation {
+    condition     = alltrue([for a in(var.reverse_local_peered_address_spaces == null ? [] : var.reverse_local_peered_address_spaces) : can(cidrhost(a.address_prefix, 0))])
+    error_message = "Each `address_prefix` in `reverse_local_peered_address_spaces` must be a valid CIDR block, for example \"10.0.0.0/24\"."
+  }
 }
 
 variable "reverse_local_peered_subnets" {
@@ -209,6 +247,11 @@ variable "reverse_remote_peered_address_spaces" {
   }))
   default     = []
   description = "The address space of the local virtual network to peer. Only relevant if reverse_peer_complete_vnets is false"
+
+  validation {
+    condition     = alltrue([for a in(var.reverse_remote_peered_address_spaces == null ? [] : var.reverse_remote_peered_address_spaces) : can(cidrhost(a.address_prefix, 0))])
+    error_message = "Each `address_prefix` in `reverse_remote_peered_address_spaces` must be a valid CIDR block, for example \"10.0.0.0/24\"."
+  }
 }
 
 variable "reverse_remote_peered_subnets" {
